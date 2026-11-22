@@ -42,10 +42,11 @@ foreach ($line in $envDump) {
 $env:PATH = "$Glslang;$ninjaDir;$(Split-Path $cmake);$env:PATH"
 
 # --- the fork with our patches ------------------------------------------------------------------------------------------------
-# long paths and no CRLF conversion for this process only (nothing in your git configuration changes)
+# long paths and CRLF working files for this process only (nothing in your git configuration changes). The patches are CRLF
+# (made on Windows), so the fork's files must be checked out with CRLF too, as on the CI's Windows runner (autocrlf=true).
 $env:GIT_CONFIG_COUNT = '2'
 $env:GIT_CONFIG_KEY_0 = 'core.longpaths'; $env:GIT_CONFIG_VALUE_0 = 'true'
-$env:GIT_CONFIG_KEY_1 = 'core.autocrlf'; $env:GIT_CONFIG_VALUE_1 = 'false'
+$env:GIT_CONFIG_KEY_1 = 'core.autocrlf'; $env:GIT_CONFIG_VALUE_1 = 'true'
 if (-not (Test-Path (Join-Path $fork 'CMakeLists.txt'))) {
     New-Item -ItemType Directory -Force $Work | Out-Null
     $bashFork = ($fork -replace '\\', '/')
