@@ -81,6 +81,23 @@ its own full game folder, firmware and profile. With the fix:
 Tested with `KARTRECOMP_ROOM_FAST=1` (host) and `15` (guest). Not tested with the default `0`, with a second PC, or with
 more than two players.
 
+## Second fix: `KARTRECOMP_PROFILE_NAME` was ignored on Windows (every lobby entry said "suyu")
+
+Symptom: the launcher's "Profile name" (the `KARTRECOMP_PROFILE_NAME` variable) had no effect: Wireless Play's lobby
+showed every player as `suyu`, the console profile's default name. The lobby shows the LDN node's user name, which the game
+takes from its console profile.
+
+Cause: the variable was applied only by the native services (`ApplyProfileName` in `native_services_list.cpp`, called when
+the native `acc` service is built). The Windows engine runs the emulated kernel and services, so nothing ever read it.
+
+Fix (also in patch 0004, `suyu_cmd/suyu.cpp`): right after `system.Load` returns and before the game runs, rename the
+playing user's console profile (`ProfileManager::SetProfileBase`, saved in `profiles.dat`). It cuts to 10 characters, the
+console's limit, without splitting a UTF-8 character. Log line: `kart-recomp: profile name 'suyu' -> 'GVHost'`.
+
+Note: the rename is saved in `nand/system/save/8000000000000010/su/avators/profiles.dat`, so it persists after the variable is
+removed. Two game folders that were copied from one another share the same profile id: give the copy its own profile by
+deleting its `nand/system/save` folder (the firmware in `nand/system/Contents` stays).
+
 ## Build (Windows only, local)
 
 `packaging/windows/build-engine-local.ps1` builds only `mk8d-engine.exe` from the pinned suyu fork plus `patches/suyu`,
