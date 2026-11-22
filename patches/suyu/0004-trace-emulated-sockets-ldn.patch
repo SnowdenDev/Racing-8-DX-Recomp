@@ -1,3 +1,217 @@
+diff --git a/src/audio_core/sink/cubeb_sink.cpp b/src/audio_core/sink/cubeb_sink.cpp
+index 162b841..a2edf3a 100644
+--- a/src/audio_core/sink/cubeb_sink.cpp
++++ b/src/audio_core/sink/cubeb_sink.cpp
+@@ -4,7 +4,11 @@
+ // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <atomic>
++#include <chrono>
++#include <mutex>
+ #include <span>
++#include <thread>
+ #include <vector>
+ 
+ #include "audio_core/common/common.h"
+@@ -80,6 +84,10 @@ public:
+                  "latency {}",
+                  name, type, params.rate, params.channels, system_channels, minimum_latency);
+ 
++        saved_params = params;
++        saved_latency = minimum_latency;
++        saved_output = output_device;
++        saved_input = input_device;
+         auto init_error{0};
+         if (type == StreamType::In) {
+             init_error = cubeb_stream_init(ctx, &stream_backend, name.c_str(), input_device,
+@@ -94,9 +102,10 @@ public:
+         }
+ 
+         if (init_error != CUBEB_OK) {
+-            LOG_CRITICAL(Audio_Sink, "Error initializing cubeb stream, error: {}", init_error);
+-            return;
++            LOG_CRITICAL(Audio_Sink, "Error initializing cubeb stream, error: {}; the game's audio is consumed silently until a device opens", init_error);
++            stream_backend = nullptr;
+         }
++        keeper = std::thread([this] { Keeper(); });
+     }
+ 
+     /**
+@@ -121,7 +130,15 @@ public:
+      */
+     void Finalize() override {
+         Stop();
+-        cubeb_stream_destroy(stream_backend);
++        quit = true;
++        if (keeper.joinable()) {
++            keeper.join();
++        }
++        std::scoped_lock lock{stream_mutex};
++        if (stream_backend) {
++            cubeb_stream_destroy(stream_backend);
++            stream_backend = nullptr;
++        }
+     }
+ 
+     /**
+@@ -136,8 +153,11 @@ public:
+         }
+ 
+         paused = false;
+-        if (cubeb_stream_start(stream_backend) != CUBEB_OK) {
++        NoteCallback();
++        std::scoped_lock lock{stream_mutex};
++        if (stream_backend && cubeb_stream_start(stream_backend) != CUBEB_OK) {
+             LOG_CRITICAL(Audio_Sink, "Error starting cubeb stream");
++            failed = true;
+         }
+     }
+ 
+@@ -150,7 +170,8 @@ public:
+         }
+ 
+         SignalPause();
+-        if (cubeb_stream_stop(stream_backend) != CUBEB_OK) {
++        std::scoped_lock lock{stream_mutex};
++        if (stream_backend && cubeb_stream_stop(stream_backend) != CUBEB_OK) {
+             LOG_CRITICAL(Audio_Sink, "Error stopping cubeb stream");
+         }
+     }
+@@ -177,6 +198,8 @@ private:
+         const std::size_t num_channels = impl->GetDeviceChannels();
+         const std::size_t frame_size = num_channels;
+         const std::size_t num_frames{static_cast<size_t>(num_frames_)};
++        impl->NoteCallback();
++        std::scoped_lock consume_lock{impl->consume_mutex};
+ 
+         if (impl->type == StreamType::In) {
+             std::span<const s16> input_buffer{reinterpret_cast<const s16*>(in_buff),
+@@ -197,12 +220,123 @@ private:
+      * @param user_data   - Custom data pointer passed along, points to a CubebSinkStream.
+      * @param state       - New state of the device.
+      */
+-    static void StateCallback(cubeb_stream*, void*, cubeb_state) {}
++    static void StateCallback(cubeb_stream*, void* user_data, cubeb_state state) {
++        if (state == CUBEB_STATE_ERROR && user_data) {
++            static_cast<CubebSinkStream*>(user_data)->failed = true;
++        }
++    }
++
++    void NoteCallback() {
++        last_callback_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++                               std::chrono::steady_clock::now().time_since_epoch())
++                               .count();
++    }
++
++    /// (Re)open the stream with the parameters used the first time. The caller holds stream_mutex.
++    bool OpenStream() {
++        if (stream_backend) {
++            cubeb_stream_destroy(stream_backend);
++            stream_backend = nullptr;
++        }
++        int error{};
++        if (type == StreamType::In) {
++            error = cubeb_stream_init(ctx, &stream_backend, name.c_str(), saved_input, &saved_params, saved_output,
++                                      nullptr, saved_latency, &CubebSinkStream::DataCallback,
++                                      &CubebSinkStream::StateCallback, this);
++        } else {
++            error = cubeb_stream_init(ctx, &stream_backend, name.c_str(), saved_input, nullptr, saved_output,
++                                      &saved_params, saved_latency, &CubebSinkStream::DataCallback,
++                                      &CubebSinkStream::StateCallback, this);
++        }
++        if (error != CUBEB_OK) {
++            stream_backend = nullptr;
++            return false;
++        }
++        return true;
++    }
++
++    /// kart-recomp: keeps the game's audio flowing when the device does not ask for samples (see make_patch4 notes).
++    void Keeper() {
++        using Clock = std::chrono::steady_clock;
++#ifdef _WIN32
++        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
++#endif
++        const auto chunk = std::chrono::microseconds(1'000'000ull * TargetSampleCount / TargetSampleRate);
++        std::vector<s16> scratch(static_cast<size_t>(TargetSampleCount) * (std::max)(device_channels, 2u));
++        auto next_due = Clock::now();
++        auto last_reopen = Clock::now();
++        bool silent = false;
++        while (!quit) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(4));
++            const auto now = Clock::now();
++            const s64 now_ms =
++                std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
++            if (paused) {
++                next_due = now;
++                continue;
++            }
++            bool no_device;
++            {
++                std::scoped_lock lock{stream_mutex};
++                no_device = !stream_backend || failed;
++            }
++            const bool stalled = no_device || now_ms - last_callback_ms > 300;
++            if (stalled && !silent) {
++                silent = true;
++                next_due = now;
++                LOG_WARNING(Audio_Sink, "audio output stream {} is not asking for samples: consuming silently", name);
++            } else if (!stalled && silent) {
++                silent = false;
++                LOG_INFO(Audio_Sink, "audio output stream {} is back", name);
++            }
++            if (stalled && now - last_reopen > std::chrono::seconds(2)) {
++                last_reopen = now;
++                std::scoped_lock lock{stream_mutex};
++                if (OpenStream()) {
++                    failed = false;
++                    NoteCallback();
++                    if (!paused && cubeb_stream_start(stream_backend) != CUBEB_OK) {
++                        failed = true;
++                    }
++                    LOG_INFO(Audio_Sink, "audio output stream {} re-opened", name);
++                }
++            }
++            if (!silent || type == StreamType::In) {
++                continue;
++            }
++            int chunks = 0;
++            while (next_due <= now && chunks < 40) {
++                std::scoped_lock lock{consume_mutex};
++                ProcessAudioOutAndRender(std::span<s16>{scratch.data(), static_cast<size_t>(TargetSampleCount) * device_channels},
++                                         TargetSampleCount);
++                next_due += chunk;
++                ++chunks;
++            }
++            if (next_due < now - std::chrono::milliseconds(200)) {
++                next_due = now;
++            }
++        }
++#ifdef _WIN32
++        CoUninitialize();
++#endif
++    }
+ 
+     /// Main Cubeb context
+     cubeb* ctx{};
+     /// Cubeb stream backend
+     cubeb_stream* stream_backend{};
++    /// Guards stream_backend (start, stop, re-open, destroy)
++    std::mutex stream_mutex;
++    /// One consumer at a time of the stream's sample queue: the device callback or the keeper
++    std::mutex consume_mutex;
++    std::atomic<bool> failed{false};
++    std::atomic<bool> quit{false};
++    std::atomic<s64> last_callback_ms{0};
++    std::thread keeper;
++    cubeb_stream_params saved_params{};
++    u32 saved_latency{};
++    cubeb_devid saved_output{};
++    cubeb_devid saved_input{};
+ };
+ 
+ CubebSink::CubebSink(std::string_view target_device_name) {
 diff --git a/src/core/hle/service/ldn/user_local_communication_service.cpp b/src/core/hle/service/ldn/user_local_communication_service.cpp
 index e2c4ab5..62310f4 100644
 --- a/src/core/hle/service/ldn/user_local_communication_service.cpp
