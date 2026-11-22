@@ -98,7 +98,7 @@ Note: the rename is saved in `nand/system/save/8000000000000010/su/avators/profi
 removed. Two game folders that were copied from one another share the same profile id: give the copy its own profile by
 deleting its `nand/system/save` folder (the firmware in `nand/system/Contents` stays).
 
-## Open: random drops later in a session (two games on one PC)
+## Random drops later in a session: tied to the frame rate (confirmed on one PC)
 
 With the two fixes above a session holds through the lobby and several races (124 s, 190 s and 253 s in the last runs), but
 it can still end with "A communication error has occurred", at random moments. What the traces show:
@@ -112,6 +112,14 @@ it can still end with "A communication error has occurred", at random moments. W
 - Both games ran FSR 4 at a 3840x2160 internal size on one GPU (`upscale point: 3D 3840x2160 -> 3840x2160 with FSR 4`):
   frame pacing was 40 to 55 fps with hitches of 200 to 280 ms. The drops may come from two heavy games sharing one PC and not
   from the engine. **Not confirmed**: it needs a run with both games at low settings, or with the games on two machines.
+
+Follow-up: the same two games, same engine, with both set to 720p and no upscaler (frame pacing 590+ of every 600 frames
+under 17.5 ms, i.e. a steady 60 fps) held a session through two full races and more (the run was still going after 300 s,
+no `Disconnect` on either side). The failing runs had FSR 4 at 3840x2160 internal size on one GPU, 40 to 55 fps, and the
+laptop run (Intel graphics, 25 to 45 fps, half the packet rate of the host) dropped after 135 s. The only code change between
+the failing and the working run was more logging, so the drops follow the machine's frame rate and not the room or the sockets.
+Practical rule for Wireless Play over a room: each player needs a steady 60 fps (low resolution, no upscaler if needed).
+Not tested: a slow player with the host at 60 fps for a long time, and a second PC with a capable GPU.
 
 ## Build (Windows only, local)
 
