@@ -1,0 +1,187 @@
+diff --git a/src/core/hle/service/ldn/user_local_communication_service.cpp b/src/core/hle/service/ldn/user_local_communication_service.cpp
+index e2c4ab5..62310f4 100644
+--- a/src/core/hle/service/ldn/user_local_communication_service.cpp
++++ b/src/core/hle/service/ldn/user_local_communication_service.cpp
+@@ -3,7 +3,9 @@
+ // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
++#include <cstdio>
+ #include <memory>
++#include <string>
+ 
+ #include "core/core.h"
+ #include "core/hle/kernel/k_event.h"
+@@ -21,6 +23,29 @@
+ 
+ namespace Service::LDN {
+ 
++namespace {
++// kart-recomp trace: the network info the game polls, logged when it changes (nodes: connected flag, address, name).
++void TraceNetworkInfo(u32 result, const NetworkInfo& info) {
++    static std::string last;
++    char b[160];
++    std::snprintf(b, sizeof b, "result %#x nodes %u/%u", result, static_cast<unsigned>(info.ldn.node_count),
++                  static_cast<unsigned>(info.ldn.node_count_max));
++    std::string now = b;
++    for (size_t i = 0; i < info.ldn.nodes.size(); ++i) {
++        const auto& n = info.ldn.nodes[i];
++        if (!n.is_connected) continue;
++        std::snprintf(b, sizeof b, " [%zu id %d ip %u.%u.%u.%u v%d %.10s]", i, static_cast<int>(n.node_id),
++                      static_cast<unsigned>(n.ipv4_address[0]), static_cast<unsigned>(n.ipv4_address[1]),
++                      static_cast<unsigned>(n.ipv4_address[2]), static_cast<unsigned>(n.ipv4_address[3]),
++                      static_cast<int>(n.local_communication_version), reinterpret_cast<const char*>(n.user_name.data()));
++        now += b;
++    }
++    if (now == last) return;
++    last = now;
++    LOG_INFO(Service_LDN, "trace: GetNetworkInfo {}", now);
++}
++} // namespace
++
+ IUserLocalCommunicationService::IUserLocalCommunicationService(Core::System& system_)
+     : ServiceFramework{system_, "IUserLocalCommunicationService"},
+       service_context{system, "IUserLocalCommunicationService"},
+@@ -92,7 +117,9 @@ Result IUserLocalCommunicationService::GetNetworkInfo(
+     OutLargeData<NetworkInfo, BufferAttr_HipcPointer> out_network_info) {
+     LOG_INFO(Service_LDN, "called");
+ 
+-    R_RETURN(lan_discovery.GetNetworkInfo(*out_network_info));
++    const Result info_result = lan_discovery.GetNetworkInfo(*out_network_info);
++    TraceNetworkInfo(info_result.raw, *out_network_info);
++    R_RETURN(info_result);
+ }
+ 
+ Result IUserLocalCommunicationService::GetIpv4Address(Out<Ipv4Address> out_current_address,
+@@ -112,6 +139,15 @@ Result IUserLocalCommunicationService::GetIpv4Address(Out<Ipv4Address> out_curre
+         }
+     }
+ 
++    {
++        static Ipv4Address last_address{};
++        if (*out_current_address != last_address) {
++            last_address = *out_current_address;
++            LOG_INFO(Service_LDN, "trace: GetIpv4Address -> {}.{}.{}.{}", static_cast<unsigned>((*out_current_address)[0]),
++                     static_cast<unsigned>((*out_current_address)[1]), static_cast<unsigned>((*out_current_address)[2]),
++                     static_cast<unsigned>((*out_current_address)[3]));
++        }
++    }
+     std::reverse(std::begin(*out_current_address), std::end(*out_current_address)); // ntohl
+     std::reverse(std::begin(*out_subnet_mask), std::end(*out_subnet_mask));         // ntohl
+     R_SUCCEED();
+diff --git a/src/core/hle/service/sockets/bsd_sockets.cpp b/src/core/hle/service/sockets/bsd_sockets.cpp
+index 4b85772..80072bc 100644
+--- a/src/core/hle/service/sockets/bsd_sockets.cpp
++++ b/src/core/hle/service/sockets/bsd_sockets.cpp
+@@ -6,7 +6,10 @@
+ // service and the runtime's (core/hle/kernel/native_bsd.cpp).
+ 
+ #include <algorithm>
++#include <atomic>
++#include <cstdio>
+ #include <cstring>
++#include <string>
+ 
+ #include "common/assert.h"
+ #include "common/logging.h"
+@@ -46,6 +49,22 @@ void PutValue(std::span<u8> buffer, const T& t) {
+     std::memcpy(buffer.data(), &t, (std::min)(sizeof(T), buffer.size()));
+ }
+ 
++/// kart-recomp trace: a call counter (the first 3000 calls are logged) and a hex dump of the first bytes of a buffer.
++bool TraceOn() {
++    static std::atomic<int> calls{0};
++    return calls.fetch_add(1) < 3000;
++}
++
++std::string TraceHex(std::span<const u8> d, size_t n = 16) {
++    std::string out;
++    char b[4];
++    for (size_t i = 0; i < d.size() && i < n; ++i) {
++        std::snprintf(b, sizeof b, "%02x", d[i]);
++        out += b;
++    }
++    return out;
++}
++
+ } // Anonymous namespace
+ 
+ BsdSockets& BsdSockets::Shared() {
+@@ -69,6 +88,7 @@ BsdSockets::~BsdSockets() {
+ }
+ 
+ std::pair<s32, Errno> BsdSockets::SocketImpl(Domain domain, Type type, Protocol protocol) {
++    if (TraceOn()) LOG_INFO(Service, "bsd: socket(domain {}, type {}, protocol {})", static_cast<u32>(domain), static_cast<u32>(type), static_cast<u32>(protocol));
+ 
+     if (type == Type::SEQPACKET) {
+         UNIMPLEMENTED_MSG("SOCK_SEQPACKET errno management");
+@@ -112,6 +132,7 @@ std::pair<s32, Errno> BsdSockets::SocketImpl(Domain domain, Type type, Protocol
+ 
+ std::pair<s32, Errno> BsdSockets::PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
+                                     s32 nfds, s32 timeout) {
++    if (TraceOn()) LOG_INFO(Service, "bsd: poll(nfds {}, timeout {} ms) {}", nfds, timeout, TraceHex(read_buffer, 32));
+     if (nfds <= 0) {
+         // When no entries are provided, -1 is returned with errno zero
+         return {-1, Errno::SUCCESS};
+@@ -217,7 +238,9 @@ Errno BsdSockets::BindImpl(s32 fd, std::span<const u8> addr) {
+ 
+     auto addr_in = GetValue<SockAddrIn>(addr);
+ 
+-    return Translate(file_descriptors[fd]->socket->Bind(Translate(addr_in)));
++    const Errno bind_result = Translate(file_descriptors[fd]->socket->Bind(Translate(addr_in)));
++    if (TraceOn()) LOG_INFO(Service, "bsd: bind(fd {}) {} -> errno {}", fd, TraceHex(addr), static_cast<u32>(bind_result));
++    return bind_result;
+ }
+ 
+ Errno BsdSockets::ConnectImpl(s32 fd, std::span<const u8> addr) {
+@@ -234,6 +257,7 @@ Errno BsdSockets::ConnectImpl(s32 fd, std::span<const u8> addr) {
+     auto addr_in = GetValue<SockAddrIn>(addr);
+ 
+     const Errno result = Translate(file_descriptors[fd]->socket->Connect(Translate(addr_in)));
++    if (TraceOn()) LOG_INFO(Service, "bsd: connect(fd {}) {} -> errno {}", fd, TraceHex(addr), static_cast<u32>(result));
+ 
+     if (result == Errno::ISCONN) {
+         LOG_DEBUG(Service, "returned ISCONN - socket already connected");
+@@ -299,6 +323,7 @@ Errno BsdSockets::ListenImpl(s32 fd, s32 backlog) {
+ }
+ 
+ std::pair<s32, Errno> BsdSockets::FcntlImpl(s32 fd, FcntlCmd cmd, s32 arg) {
++    if (TraceOn()) LOG_INFO(Service, "bsd: fcntl(fd {}, cmd {}, arg {})", fd, static_cast<u32>(cmd), arg);
+     if (!IsFileDescriptorValid(fd)) {
+         return {-1, Errno::BADF};
+     }
+@@ -364,6 +389,7 @@ Errno BsdSockets::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector
+ }
+ 
+ Errno BsdSockets::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8> optval) {
++    if (TraceOn()) LOG_INFO(Service, "bsd: setsockopt(fd {}, level {}, name {}) {}", fd, level, static_cast<u32>(optname), TraceHex(optval, 8));
+     if (!IsFileDescriptorValid(fd)) {
+         return Errno::BADF;
+     }
+@@ -500,6 +526,7 @@ std::pair<s32, Errno> BsdSockets::RecvFromImpl(s32 fd, u32 flags, std::vector<u8
+         }
+     }
+ 
++    if ((ret >= 0 || bsd_errno != Errno::AGAIN) && TraceOn()) LOG_INFO(Service, "bsd: recvfrom(fd {}) -> {} errno {}", fd, ret, static_cast<u32>(bsd_errno));
+     return {ret, bsd_errno};
+ }
+ 
+@@ -516,6 +543,7 @@ std::pair<s32, Errno> BsdSockets::SendImpl(s32 fd, u32 flags, std::span<const u8
+ 
+ std::pair<s32, Errno> BsdSockets::SendToImpl(s32 fd, u32 flags, std::span<const u8> message,
+                                       std::span<const u8> addr) {
++    if (TraceOn()) LOG_INFO(Service, "bsd: sendto called (fd {}, flags {}, {} bytes) to {}", fd, flags, message.size(), TraceHex(addr));
+     if (!IsFileDescriptorValid(fd)) {
+         return {-1, Errno::BADF};
+     }
+@@ -533,7 +561,9 @@ std::pair<s32, Errno> BsdSockets::SendToImpl(s32 fd, u32 flags, std::span<const
+         p_addr_in = &addr_in;
+     }
+ 
+-    return Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));
++    const auto sent = Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));
++    if (TraceOn()) LOG_INFO(Service, "bsd: sendto(fd {}) -> {} errno {}", fd, sent.first, static_cast<u32>(sent.second));
++    return sent;
+ }
+ 
+ Errno BsdSockets::CloseImpl(s32 fd) {
