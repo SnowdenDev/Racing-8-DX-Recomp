@@ -8504,14 +8504,17 @@ new file mode 100644
 index 0000000000..e1eacc7ed6
 --- /dev/null
 +++ b/src/core/hle/kernel/native_bsd.cpp
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,190 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the socket service ("bsd:u", "bsd:s") answered by the runtime. The sockets are suyu's socket library
 +// (core/hle/service/sockets/bsd_sockets: host sockets, or room proxy sockets while the engine is in a multiplayer room, which is
 +// how local wireless play reaches the other members); this replaces only the service around it. The game opens it when it enters
 +// Wireless Play (without it the game stopped there with 2021-0007).
 +#include <atomic>
++#include <cstdio>
 +#include <memory>
++#include <span>
++#include <string>
 +#include <vector>
 +
 +#include "common/logging.h"
@@ -8528,7 +8531,8 @@ index 0000000000..e1eacc7ed6
 +
 +void PushResult(Context& c, s32 ret, Errno err) {
 +    static std::atomic<int> logged{0};
-+    if (err != Errno::SUCCESS && err != Errno::AGAIN && logged.fetch_add(1) < 50)
++    static std::atomic<int> traced{0}; // kart-recomp trace: every socket result of the first 4000 calls
++    if (traced.fetch_add(1) < 4000 || (err != Errno::SUCCESS && err != Errno::AGAIN && logged.fetch_add(1) < 50))
 +        LOG_INFO(Service, "sockets: command {} -> {} errno {}", c.Command(), ret, static_cast<u32>(err));
 +    c.Push<s32>(ret);
 +    c.Push<u32>(static_cast<u32>(err));
@@ -8537,6 +8541,17 @@ index 0000000000..e1eacc7ed6
 +void PushErrno(Context& c, Errno err) { PushResult(c, err == Errno::SUCCESS ? 0 : -1, err); }
 +
 +std::vector<u8> OutBuffer(Context& c, size_t i = 0) { return std::vector<u8>(c.WriteBufferSize(i)); }
++
++/// kart-recomp trace: the first bytes of a buffer as hex.
++std::string Hex(std::span<const u8> d, size_t n = 24) {
++    std::string out;
++    char b[4];
++    for (size_t i = 0; i < d.size() && i < n; ++i) {
++        std::snprintf(b, sizeof b, "%02x", d[i]);
++        out += b;
++    }
++    return out;
++}
 +
 +} // namespace
 +
@@ -8550,6 +8565,7 @@ index 0000000000..e1eacc7ed6
 +    s->Ok(1);                                      // StartMonitoring
 +    s->On(2, [&t](Context& c) {                    // Socket(domain, type, protocol)
 +        const u32 domain = c.Pop<u32>(), type = c.Pop<u32>(), protocol = c.Pop<u32>();
++        LOG_INFO(Service, "sockets: socket(domain {}, type {}, protocol {})", domain, type, protocol);
 +        const auto [fd, err] = t.SocketImpl(static_cast<Domain>(domain), static_cast<Type>(type), static_cast<Protocol>(protocol));
 +        PushResult(c, fd, err);
 +    });
@@ -8557,6 +8573,7 @@ index 0000000000..e1eacc7ed6
 +    s->On(6, [&t](Context& c) { // Poll(nfds, timeout ms; fds in, fds out)
 +        const s32 nfds = c.Pop<s32>(), timeout = c.Pop<s32>();
 +        const auto in = c.ReadBuffer(0);
++        LOG_INFO(Service, "sockets: poll(nfds {}, timeout {} ms) in {}", nfds, timeout, Hex(in, 48));
 +        auto out = OutBuffer(c);
 +        const auto [ret, err] = c.kernel.Blocking([&] { return t.PollImpl(out, in, nfds, timeout); });
 +        if (!out.empty()) c.WriteBuffer(out.data(), out.size(), 0);
@@ -8575,6 +8592,7 @@ index 0000000000..e1eacc7ed6
 +        const u32 flags = c.Pop<u32>();
 +        auto message = OutBuffer(c, 0);
 +        auto addr = OutBuffer(c, 1);
++        LOG_INFO(Service, "sockets: recvfrom(fd {}, flags {}, room for {} bytes)", fd, flags, message.size());
 +        const auto [ret, err] = c.kernel.Blocking([&] { return t.RecvFromImpl(fd, flags, message, addr); });
 +        if (ret > 0) c.WriteBuffer(message.data(), static_cast<size_t>(ret), 0);
 +        if (!addr.empty()) c.WriteBuffer(addr.data(), addr.size(), 1);
@@ -8595,6 +8613,7 @@ index 0000000000..e1eacc7ed6
 +        const u32 flags = c.Pop<u32>();
 +        const auto message = c.ReadBuffer(0);
 +        const auto addr = c.ReadBuffer(1);
++        LOG_INFO(Service, "sockets: sendto(fd {}, flags {}, {} bytes) to {}", fd, flags, message.size(), Hex(addr, 16));
 +        const auto [ret, err] = c.kernel.Blocking([&] { return t.SendToImpl(fd, flags, message, addr); });
 +        PushResult(c, ret, err);
 +    });
@@ -8610,12 +8629,14 @@ index 0000000000..e1eacc7ed6
 +        const s32 fd = c.Pop<s32>();
 +        const auto addr = c.ReadBuffer(0);
 +        if (addr.size() < 16) return PushErrno(c, Errno::INVAL);
++        LOG_INFO(Service, "sockets: bind(fd {}) {}", fd, Hex(addr, 16));
 +        PushErrno(c, t.BindImpl(fd, addr));
 +    });
 +    s->On(14, [&t](Context& c) { // Connect(fd; address)
 +        const s32 fd = c.Pop<s32>();
 +        const auto addr = c.ReadBuffer(0);
 +        if (addr.size() < 16) return PushErrno(c, Errno::INVAL);
++        LOG_INFO(Service, "sockets: connect(fd {}) {}", fd, Hex(addr, 16));
 +        PushErrno(c, c.kernel.Blocking([&] { return t.ConnectImpl(fd, addr); }));
 +    });
 +    const auto name_of = [&t](Context& c, bool peer) { // GetPeerName / GetSockName(fd) -> address
@@ -8645,6 +8666,7 @@ index 0000000000..e1eacc7ed6
 +    });
 +    s->On(20, [&t](Context& c) { // Fcntl(fd, cmd, arg)
 +        const s32 fd = c.Pop<s32>(), cmd = c.Pop<s32>(), arg = c.Pop<s32>();
++        LOG_INFO(Service, "sockets: fcntl(fd {}, cmd {}, arg {})", fd, cmd, arg);
 +        const auto [ret, err] = t.FcntlImpl(fd, static_cast<FcntlCmd>(cmd), arg);
 +        PushResult(c, ret, err);
 +    });
@@ -8654,6 +8676,7 @@ index 0000000000..e1eacc7ed6
 +        const auto name = static_cast<OptName>(c.Pop<u32>());
 +        const auto value = c.ReadBuffer(0);
 +        if (value.size() < sizeof(u32) && level == static_cast<u32>(SocketLevel::SOCKET)) return PushErrno(c, Errno::INVAL);
++        LOG_INFO(Service, "sockets: setsockopt(fd {}, level {}, name {}) {}", fd, level, static_cast<u32>(name), Hex(value, 8));
 +        PushErrno(c, t.SetSockOptImpl(fd, level, name, value));
 +    });
 +    s->On(22, [&t](Context& c) { // Shutdown(fd, how)
@@ -9676,15 +9699,17 @@ new file mode 100644
 index 0000000000..4458fe3833
 --- /dev/null
 +++ b/src/core/hle/kernel/native_ldn.cpp
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,219 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: local wireless ("ldn:u") answered by the runtime, carried over a multiplayer room. The network logic (access
 +// point / station state, node lists, advertise data, the LDN packets) is suyu's LANDiscovery library, and the transport is
 +// suyu's room client (network/room_member, ENet); this replaces only the service around them (docs/NATIVE_ENGINE.md,
 +// "Multiplayer rooms"). Without a joined room the game sees what a console in airplane mode reports.
 +#include <algorithm>
++#include <cstdio>
 +#include <cstring>
 +#include <memory>
++#include <string>
 +#include <span>
 +#include <vector>
 +
@@ -9707,6 +9732,27 @@ index 0000000000..4458fe3833
 +using KartRuntime::Event;
 +using KartRuntime::NativeKernel;
 +using KartRuntime::Service;
++
++/// kart-recomp trace: the network info the game polls, logged when it changes (nodes: connected flag, address, name).
++void TraceNetworkInfo(u32 result, const NetworkInfo& info) {
++    static std::string last;
++    std::string now;
++    char b[160];
++    std::snprintf(b, sizeof b, "result %#x nodes %u/%u", result, static_cast<unsigned>(info.ldn.node_count),
++                  static_cast<unsigned>(info.ldn.node_count_max));
++    now = b;
++    for (size_t i = 0; i < info.ldn.nodes.size(); ++i) {
++        const auto& n = info.ldn.nodes[i];
++        if (!n.is_connected) continue;
++        std::snprintf(b, sizeof b, " [%zu id %d ip %u.%u.%u.%u v%d %.10s]", i, static_cast<int>(n.node_id), n.ipv4_address[0],
++                      n.ipv4_address[1], n.ipv4_address[2], n.ipv4_address[3], static_cast<int>(n.local_communication_version),
++                      reinterpret_cast<const char*>(n.user_name.data()));
++        now += b;
++    }
++    if (now == last) return;
++    last = now;
++    LOG_INFO(Service_LDN, "trace: GetNetworkInfo {}", now);
++}
 +
 +/// One IUserLocalCommunicationService: its LANDiscovery, the room callback feeding it and the state-change event.
 +struct LocalCommunication {
@@ -9759,6 +9805,7 @@ index 0000000000..4458fe3833
 +    s->On(1, [l](Context& c) { // GetNetworkInfo -> pointer buffer
 +        NetworkInfo info{};
 +        const Result r = l->discovery.GetNetworkInfo(info);
++        TraceNetworkInfo(r.raw, info);
 +        if (r.IsError()) return c.SetResult(r.raw);
 +        c.WriteBuffer(&info, sizeof(info), 0);
 +    });
@@ -9770,6 +9817,14 @@ index 0000000000..4458fe3833
 +        if (auto member = Network::GetRoomMember().lock(); member && member->IsConnected()) address = member->GetFakeIpAddress();
 +        std::reverse(address.begin(), address.end());
 +        std::reverse(mask.begin(), mask.end());
++        {
++            static Ipv4Address last_address{};
++            if (address != last_address) {
++                last_address = address;
++                LOG_INFO(Service_LDN, "trace: GetIpv4Address -> {}.{}.{}.{}", static_cast<unsigned>(address[0]),
++                         static_cast<unsigned>(address[1]), static_cast<unsigned>(address[2]), static_cast<unsigned>(address[3]));
++            }
++        }
 +        c.Push(address);
 +        c.Push(mask);
 +    });
