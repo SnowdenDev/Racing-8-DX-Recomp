@@ -70,7 +70,7 @@ index e2c4ab5..62310f4 100644
      std::reverse(std::begin(*out_subnet_mask), std::end(*out_subnet_mask));         // ntohl
      R_SUCCEED();
 diff --git a/src/core/hle/service/sockets/bsd_sockets.cpp b/src/core/hle/service/sockets/bsd_sockets.cpp
-index 4b85772..80072bc 100644
+index 4b85772..8d25c97 100644
 --- a/src/core/hle/service/sockets/bsd_sockets.cpp
 +++ b/src/core/hle/service/sockets/bsd_sockets.cpp
 @@ -6,7 +6,10 @@
@@ -107,15 +107,46 @@ index 4b85772..80072bc 100644
  } // Anonymous namespace
  
  BsdSockets& BsdSockets::Shared() {
-@@ -69,6 +88,7 @@ BsdSockets::~BsdSockets() {
+@@ -57,11 +76,29 @@ BsdSockets::BsdSockets() {
+     if (auto room_member = Network::GetRoomMember().lock()) {
+         proxy_packet_received = room_member->BindOnProxyPacketReceived(
+             [this](const Network::ProxyPacket& packet) { OnProxyPacketReceived(packet); });
++        proxy_bound = true;
+     } else {
+         LOG_ERROR(Service, "Network isn't initialized");
+     }
+ }
+ 
++// kart-recomp: the room client is created after the game is loaded (suyu_cmd), but this table is built while loading,
++// so the constructor above may have found no room client and never bound the room's packets: the game's sockets then
++// received nothing and Wireless Play dropped the connection a few seconds after it was made. Bind on first use.
++void BsdSockets::EnsureProxyBinding() {
++    bool expected = false;
++    if (!proxy_bound.compare_exchange_strong(expected, true)) {
++        return;
++    }
++    if (auto room_member = Network::GetRoomMember().lock()) {
++        proxy_packet_received = room_member->BindOnProxyPacketReceived(
++            [this](const Network::ProxyPacket& packet) { OnProxyPacketReceived(packet); });
++        LOG_INFO(Service, "bsd: room packets bound to the socket table (the room client was created after the table)");
++    } else {
++        proxy_bound = false;
++    }
++}
++
+ BsdSockets::~BsdSockets() {
+     if (auto room_member = Network::GetRoomMember().lock()) {
+         room_member->Unbind(proxy_packet_received);
+@@ -69,6 +106,8 @@ BsdSockets::~BsdSockets() {
  }
  
  std::pair<s32, Errno> BsdSockets::SocketImpl(Domain domain, Type type, Protocol protocol) {
++    EnsureProxyBinding();
 +    if (TraceOn()) LOG_INFO(Service, "bsd: socket(domain {}, type {}, protocol {})", static_cast<u32>(domain), static_cast<u32>(type), static_cast<u32>(protocol));
  
      if (type == Type::SEQPACKET) {
          UNIMPLEMENTED_MSG("SOCK_SEQPACKET errno management");
-@@ -112,6 +132,7 @@ std::pair<s32, Errno> BsdSockets::SocketImpl(Domain domain, Type type, Protocol
+@@ -112,6 +151,7 @@ std::pair<s32, Errno> BsdSockets::SocketImpl(Domain domain, Type type, Protocol
  
  std::pair<s32, Errno> BsdSockets::PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
                                      s32 nfds, s32 timeout) {
@@ -123,7 +154,7 @@ index 4b85772..80072bc 100644
      if (nfds <= 0) {
          // When no entries are provided, -1 is returned with errno zero
          return {-1, Errno::SUCCESS};
-@@ -217,7 +238,9 @@ Errno BsdSockets::BindImpl(s32 fd, std::span<const u8> addr) {
+@@ -217,7 +257,9 @@ Errno BsdSockets::BindImpl(s32 fd, std::span<const u8> addr) {
  
      auto addr_in = GetValue<SockAddrIn>(addr);
  
@@ -134,7 +165,7 @@ index 4b85772..80072bc 100644
  }
  
  Errno BsdSockets::ConnectImpl(s32 fd, std::span<const u8> addr) {
-@@ -234,6 +257,7 @@ Errno BsdSockets::ConnectImpl(s32 fd, std::span<const u8> addr) {
+@@ -234,6 +276,7 @@ Errno BsdSockets::ConnectImpl(s32 fd, std::span<const u8> addr) {
      auto addr_in = GetValue<SockAddrIn>(addr);
  
      const Errno result = Translate(file_descriptors[fd]->socket->Connect(Translate(addr_in)));
@@ -142,7 +173,7 @@ index 4b85772..80072bc 100644
  
      if (result == Errno::ISCONN) {
          LOG_DEBUG(Service, "returned ISCONN - socket already connected");
-@@ -299,6 +323,7 @@ Errno BsdSockets::ListenImpl(s32 fd, s32 backlog) {
+@@ -299,6 +342,7 @@ Errno BsdSockets::ListenImpl(s32 fd, s32 backlog) {
  }
  
  std::pair<s32, Errno> BsdSockets::FcntlImpl(s32 fd, FcntlCmd cmd, s32 arg) {
@@ -150,7 +181,7 @@ index 4b85772..80072bc 100644
      if (!IsFileDescriptorValid(fd)) {
          return {-1, Errno::BADF};
      }
-@@ -364,6 +389,7 @@ Errno BsdSockets::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector
+@@ -364,6 +408,7 @@ Errno BsdSockets::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector
  }
  
  Errno BsdSockets::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8> optval) {
@@ -158,7 +189,7 @@ index 4b85772..80072bc 100644
      if (!IsFileDescriptorValid(fd)) {
          return Errno::BADF;
      }
-@@ -500,6 +526,7 @@ std::pair<s32, Errno> BsdSockets::RecvFromImpl(s32 fd, u32 flags, std::vector<u8
+@@ -500,6 +545,7 @@ std::pair<s32, Errno> BsdSockets::RecvFromImpl(s32 fd, u32 flags, std::vector<u8
          }
      }
  
@@ -166,7 +197,7 @@ index 4b85772..80072bc 100644
      return {ret, bsd_errno};
  }
  
-@@ -516,6 +543,7 @@ std::pair<s32, Errno> BsdSockets::SendImpl(s32 fd, u32 flags, std::span<const u8
+@@ -516,6 +562,7 @@ std::pair<s32, Errno> BsdSockets::SendImpl(s32 fd, u32 flags, std::span<const u8
  
  std::pair<s32, Errno> BsdSockets::SendToImpl(s32 fd, u32 flags, std::span<const u8> message,
                                        std::span<const u8> addr) {
@@ -174,7 +205,7 @@ index 4b85772..80072bc 100644
      if (!IsFileDescriptorValid(fd)) {
          return {-1, Errno::BADF};
      }
-@@ -533,7 +561,9 @@ std::pair<s32, Errno> BsdSockets::SendToImpl(s32 fd, u32 flags, std::span<const
+@@ -533,7 +580,9 @@ std::pair<s32, Errno> BsdSockets::SendToImpl(s32 fd, u32 flags, std::span<const
          p_addr_in = &addr_in;
      }
  
@@ -185,3 +216,28 @@ index 4b85772..80072bc 100644
  }
  
  Errno BsdSockets::CloseImpl(s32 fd) {
+diff --git a/src/core/hle/service/sockets/bsd_sockets.h b/src/core/hle/service/sockets/bsd_sockets.h
+index 89abc50..f89adb5 100644
+--- a/src/core/hle/service/sockets/bsd_sockets.h
++++ b/src/core/hle/service/sockets/bsd_sockets.h
+@@ -8,6 +8,7 @@
+ #pragma once
+ 
+ #include <array>
++#include <atomic>
+ #include <memory>
+ #include <optional>
+ #include <span>
+@@ -69,9 +70,12 @@ private:
+     bool IsFileDescriptorValid(s32 fd) const noexcept;
+     /// A packet from the room for one of the proxy sockets.
+     void OnProxyPacketReceived(const Network::ProxyPacket& packet);
++    /// Binds the room's packets to this table once the room client exists (it is created after the game is loaded).
++    void EnsureProxyBinding();
+ 
+     std::array<std::optional<FileDescriptor>, MAX_FD> file_descriptors{};
+     Network::RoomMember::CallbackHandle<Network::ProxyPacket> proxy_packet_received;
++    std::atomic<bool> proxy_bound{false};
+ };
+ 
+ } // namespace Service::Sockets
