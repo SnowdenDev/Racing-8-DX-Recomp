@@ -241,6 +241,42 @@ index 89abc50..f89adb5 100644
  };
  
  } // namespace Service::Sockets
+diff --git a/src/network/room_member.cpp b/src/network/room_member.cpp
+index 602f8fd..e18a5c2 100644
+--- a/src/network/room_member.cpp
++++ b/src/network/room_member.cpp
+@@ -165,7 +165,7 @@ public:
+ // sending (a long load) when the other side gives up on the connection.
+ namespace {
+ std::atomic<u64> g_proxy_sent{0}, g_proxy_received{0};
+-void LogProxyTraffic() {
++void LogProxyTraffic(ENetPeer* peer) {
+     static auto last = std::chrono::steady_clock::now();
+     static u64 sent_seen = 0, received_seen = 0;
+     const auto now = std::chrono::steady_clock::now();
+@@ -174,7 +174,12 @@ void LogProxyTraffic() {
+     const u64 s = g_proxy_sent.load(), r = g_proxy_received.load();
+     static bool quiet = true; // one "0 sent, 0 received" line when traffic stops, then silence until it starts again
+     const bool idle = s == sent_seen && r == received_seen;
+-    if (!idle || !quiet) LOG_INFO(Network, "room traffic (2 s): {} game packets sent, {} received", s - sent_seen, r - received_seen);
++    if (!idle || !quiet)
++        LOG_INFO(Network, "room traffic (2 s): {} game packets sent, {} received | ENet rtt {} ms (var {}), loss {}, lost {}, in flight {} B, waiting to send {}, waiting for ack {}",
++                 s - sent_seen, r - received_seen, peer ? peer->roundTripTime : 0, peer ? peer->roundTripTimeVariance : 0,
++                 peer ? peer->packetLoss : 0, peer ? peer->packetsLost : 0, peer ? peer->reliableDataInTransit : 0,
++                 peer ? static_cast<unsigned>(enet_list_size(&peer->outgoingSendReliableCommands)) : 0u,
++                 peer ? static_cast<unsigned>(enet_list_size(&peer->sentReliableCommands)) : 0u);
+     quiet = idle;
+     sent_seen = s;
+     received_seen = r;
+@@ -193,7 +198,7 @@ void RoomMember::RoomMemberImpl::StartLoop() {
+             ENetEvent event;
+             const int got = enet_host_service(client, &event, wait_ms);
+             wait_ms = !KartRoomFast::On(KartRoomFast::FastLoop) ? 5 : got > 0 ? 0 : 1;
+-            LogProxyTraffic();
++            LogProxyTraffic(server);
+             if (got > 0) {
+                 switch (event.type) {
+                 case ENET_EVENT_TYPE_RECEIVE:
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
 index c22b4e7..f6adaf8 100644
 --- a/src/suyu_cmd/suyu.cpp

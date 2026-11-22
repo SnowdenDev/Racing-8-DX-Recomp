@@ -98,6 +98,21 @@ Note: the rename is saved in `nand/system/save/8000000000000010/su/avators/profi
 removed. Two game folders that were copied from one another share the same profile id: give the copy its own profile by
 deleting its `nand/system/save` folder (the firmware in `nand/system/Contents` stays).
 
+## Open: random drops later in a session (two games on one PC)
+
+With the two fixes above a session holds through the lobby and several races (124 s, 190 s and 253 s in the last runs), but
+it can still end with "A communication error has occurred", at random moments. What the traces show:
+
+- The room link is healthy: `room traffic` lines now include ENet's round trip, loss and queues, and across 128 samples it was
+  `rtt 1 ms, loss 0, lost 0, in flight 0 B, waiting to send 0, waiting for ack 0`. Nothing is delayed or lost by the room.
+- Each drop is the **guest's game** calling `Disconnect` (its socket is closed first); the host then sees
+  `Disconnect packet received!`. Both machines' traffic is normal right up to that moment.
+- Both games stop sending for about 2 s every 5 s during a race (about 3 s of 340-byte packets at ~12 per second, then
+  silence in both directions); no error is logged in those silences.
+- Both games ran FSR 4 at a 3840x2160 internal size on one GPU (`upscale point: 3D 3840x2160 -> 3840x2160 with FSR 4`):
+  frame pacing was 40 to 55 fps with hitches of 200 to 280 ms. The drops may come from two heavy games sharing one PC and not
+  from the engine. **Not confirmed**: it needs a run with both games at low settings, or with the games on two machines.
+
 ## Build (Windows only, local)
 
 `packaging/windows/build-engine-local.ps1` builds only `mk8d-engine.exe` from the pinned suyu fork plus `patches/suyu`,
