@@ -188,5 +188,9 @@ Two-game test on one PC (the owner runs these `.bat` files; they live in the pre
 - Two real machines with the new engine (laptop has Intel graphics; earlier laptop runs used the old engine builds).
 - More than two players; a full race on default settings with both players on separate PCs.
 - GameVerse integration: host/guest over the virtual network IP, UDP 24872, profile name from GV. Not started.
-- Upstream PR to https://github.com/galarianpikachu2021-hue/Racing-8-DX-Recomp: not sent (needs the owner's decision).
+- Upstream PR SENT (22 nov): https://github.com/galarianpikachu2021-hue/Racing-8-DX-Recomp/pull/40 , branch `fix-room-packets-main` of the fork,
+  based on upstream `main` (beta 4), two patches `0004-room-bind-proxy-packets-to-socket-table` and `0005-profile-name-emulated-kernel`
+  (only the room fix and the profile name; no traces, no audio keeper). Applies on 0001-0003 and passes a syntax compile of the two
+  files; the beta 4 engine was NOT run. The audio work (section 3 and 4) is NOT in the PR. Note the numbering differs from this branch,
+  where `0004` is the combined trace + fix + keeper patch.
 - License: GPL-3.0; GameVerse must not host the game, the user builds it from their own dump.
